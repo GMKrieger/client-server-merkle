@@ -60,13 +60,13 @@ impl MerkleTree {
         MerkleTree { levels }
     }
 
-    /// Convenience: build from raw file bytes (hash each file with SHA-256)
+    /// Build from raw file bytes (hash each file with SHA-256)
     pub fn from_bytes_vec(files: &[Vec<u8>]) -> Self {
         let leaves: Vec<Hash> = files.iter().map(|b| sha256(b)).collect();
         MerkleTree::from_leaves(leaves)
     }
 
-    /// Convenience: build from file paths (reads files into memory)
+    /// Build from file paths (reads files into memory)
     pub fn from_file_paths(paths: &[impl AsRef<Path>]) -> io::Result<Self> {
         let mut leaves = Vec::with_capacity(paths.len());
         for p in paths {
@@ -78,7 +78,7 @@ impl MerkleTree {
         Ok(MerkleTree::from_leaves(leaves))
     }
 
-    /// Return the root hash (clone).
+    /// Return the root hash
     pub fn root_hash(&self) -> Hash {
         self.levels.last().unwrap()[0].clone()
     }
