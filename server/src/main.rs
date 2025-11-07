@@ -3,6 +3,7 @@ use actix_web::{App, HttpResponse, HttpServer, Responder, Result, web};
 use base64::{Engine as _, engine::general_purpose};
 use serde::Serialize;
 use std::fs;
+use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -24,6 +25,11 @@ struct FileResponse {
     file_bytes: String, // base64
     proof: Vec<ProofNode>,
     root: String, // hex
+}
+
+#[derive(Serialize)]
+struct CommitResponse {
+    root: String,
 }
 
 async fn upload(
@@ -121,6 +127,52 @@ async fn get_file(state: web::Data<AppState>, path: web::Path<String>) -> Result
     Ok(HttpResponse::Ok().json(resp))
 }
 
+/// POST /commit
+/// Rebuilds the tree from files on disk, persists manifest & root, and returns root hex.
+async fn commit(state: web::Data<AppState>) -> Result<impl actix_web::Responder> {
+    // read all filenames (sorted)
+    let mut entries: Vec<_> = std::fs::read_dir(&state.storage_dir)?
+        .filter_map(|r| r.ok())
+        .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+        .map(|e| e.file_name().into_string().ok())
+        .filter_map(|s| s)
+        .collect();
+    entries.sort();
+
+    // read bytes and compute tree
+    let mut files_bytes: Vec<Vec<u8>> = Vec::with_capacity(entries.len());
+    for name in &entries {
+        let pb = state.storage_dir.join(name);
+        let data = std::fs::read(pb)?;
+        files_bytes.push(data);
+    }
+
+    let tree = MerkleTree::from_bytes_vec(&files_bytes);
+    let root = tree.root_hash();
+    let root_hex = hex::encode(&root);
+
+    // persist manifest + root
+    let manifest_path = state.storage_dir.join("manifest.json");
+    let root_path = state.storage_dir.join("root.hex");
+
+    // manifest: list of filenames in order
+    let manifest_json = serde_json::to_string(&entries)?;
+    let mut mfile = File::create(manifest_path)?;
+    mfile.write_all(manifest_json.as_bytes())?;
+
+    // root hex
+    let mut rfile = File::create(root_path)?;
+    rfile.write_all(root_hex.as_bytes())?;
+
+    // cache tree
+    {
+        let mut cache = state.cache.write().await;
+        *cache = Some(tree);
+    }
+
+    Ok(HttpResponse::Ok().json(CommitResponse { root: root_hex }))
+}
+
 async fn root(state: web::Data<AppState>) -> Result<impl Responder> {
     let cache = state.cache.read().await;
     if let Some(tree) = cache.as_ref() {
@@ -154,6 +206,7 @@ async fn main() -> std::io::Result<()> {
             .route("/upload", web::post().to(upload))
             .route("/file/{name}", web::get().to(get_file))
             .route("/root", web::get().to(root))
+            .route("/commit", web::post().to(commit))
     })
     .bind(("0.0.0.0", port))?
     .run()
