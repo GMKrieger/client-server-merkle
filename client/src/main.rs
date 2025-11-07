@@ -13,7 +13,6 @@ struct Cli {
     #[command(subcommand)]
     cmd: Commands,
 
-    /// server base URL, e.g. http://server:3000
     #[arg(long, default_value = "http://localhost:3000")]
     server: String,
 }
@@ -55,7 +54,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn upload_dir(server: &str, dir: PathBuf, root_file: PathBuf) -> anyhow::Result<()> {
-    // read files (sorted)
+    // 1. Read and sort local files
     let mut entries: Vec<_> = fs::read_dir(&dir)?
         .filter_map(|r| r.ok())
         .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
@@ -64,7 +63,6 @@ async fn upload_dir(server: &str, dir: PathBuf, root_file: PathBuf) -> anyhow::R
         .collect();
     entries.sort();
 
-    // read all bytes in order
     let mut files_bytes: Vec<Vec<u8>> = Vec::with_capacity(entries.len());
     for name in &entries {
         let p = dir.join(name);
@@ -72,13 +70,12 @@ async fn upload_dir(server: &str, dir: PathBuf, root_file: PathBuf) -> anyhow::R
         files_bytes.push(data);
     }
 
-    // build merkle tree and write root
+    // 2. Build local Merkle tree and compute root
     let tree = MerkleTree::from_bytes_vec(&files_bytes);
-    let root_hex = hex::encode(tree.root_hash());
-    fs::write(&root_file, root_hex.as_bytes())?;
-    println!("Computed and saved root to {:?}", root_file);
+    let local_root_hex = hex::encode(tree.root_hash());
+    println!("Local root: {}", local_root_hex);
 
-    // upload sequentially (could parallelize)
+    // 3. Upload files (no deletes yet)
     let client = Client::new();
     for (i, name) in entries.iter().enumerate() {
         let bytes = &files_bytes[i];
@@ -91,12 +88,44 @@ async fn upload_dir(server: &str, dir: PathBuf, root_file: PathBuf) -> anyhow::R
         if !resp.status().is_success() {
             anyhow::bail!("upload failed for {}: {:?}", name, resp.text().await?);
         } else {
-            // remove local copy per spec
-            let _ = fs::remove_file(dir.join(name));
-            println!("uploaded and removed local file {}", name);
+            println!("uploaded {}", name);
         }
     }
 
+    // 4. POST /commit to finalize on server and get server root
+    let commit_url = format!("{}/commit", server.trim_end_matches('/'));
+    let commit_resp = client.post(&commit_url).send().await?;
+    if !commit_resp.status().is_success() {
+        anyhow::bail!("commit failed: {}", commit_resp.text().await?);
+    }
+    #[derive(serde::Deserialize)]
+    struct CommitResp {
+        root: String,
+    }
+    let commit_obj: CommitResp = commit_resp.json().await?;
+    println!("Server root: {}", commit_obj.root);
+
+    // 5. Compare local root vs server root
+    if commit_obj.root != local_root_hex {
+        anyhow::bail!(
+            "root mismatch: local {} vs server {}",
+            local_root_hex,
+            commit_obj.root
+        );
+    }
+
+    // 6. On match, persist local root and delete local files
+    fs::write(&root_file, local_root_hex.as_bytes())?;
+    for name in &entries {
+        let p = dir.join(name);
+        fs::remove_file(p)?;
+        println!("deleted local {}", name);
+    }
+
+    println!(
+        "Upload+commit complete; local root saved at {:?}",
+        root_file
+    );
     Ok(())
 }
 
