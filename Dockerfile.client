@@ -1,0 +1,26 @@
+# builder
+FROM rust:1.86 as builder
+WORKDIR /workspace
+COPY . .
+RUN cargo build --release -p client
+
+FROM debian:bookworm-slim AS runtime
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends libssl3 ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN useradd --create-home --shell /bin/bash appuser
+WORKDIR /home/appuser
+
+COPY --from=builder /workspace/target/release/client /usr/local/bin/client
+
+# Create directory for client files
+RUN mkdir -p /data/client_files && chown -R appuser:appuser /data
+
+USER appuser
+
+# Set entrypoint to client binary so commands can be passed directly
+ENTRYPOINT ["/usr/local/bin/client"]
+
+# Default command keeps container running for interactive use
+CMD ["--help"]

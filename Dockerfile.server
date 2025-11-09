@@ -1,0 +1,31 @@
+# builder
+FROM rust:1.86 as builder
+WORKDIR /workspace
+# copy workspace manifests & sources
+COPY . .
+# build release for server
+RUN cargo build --release -p server
+
+# runtime image
+FROM debian:bookworm-slim
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends libssl3 ca-certificates curl && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN useradd --create-home --shell /bin/bash appuser
+WORKDIR /home/appuser
+
+# copy binary
+COPY --from=builder /workspace/target/release/server /usr/local/bin/server
+
+# create storage dir and adjust permissions
+RUN mkdir -p /data/server_files && chown -R appuser:appuser /data
+
+USER appuser
+
+ENV STORAGE_DIR=/data/server_files
+ENV PORT=3000
+
+EXPOSE 3000
+
+ENTRYPOINT ["/usr/local/bin/server"]

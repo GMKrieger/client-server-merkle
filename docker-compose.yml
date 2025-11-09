@@ -1,14 +1,53 @@
-version: '3.8'
 services:
   server:
     build:
       context: .
       dockerfile: Dockerfile.server
+    container_name: merkle-server
+    environment:
+      - STORAGE_DIR=/data/server_files
+      - PORT=3000
     ports:
       - "3000:3000"
+    volumes:
+      - server_data:/data/server_files
+    networks:
+      - merkle-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3000/root || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+
   client:
     build:
       context: .
       dockerfile: Dockerfile.client
+    container_name: merkle-client
     depends_on:
-      - server
+      server:
+        condition: service_healthy
+    environment:
+      - SERVER_URL=http://server:3000
+    volumes:
+      - client_data:/data/client_files
+    networks:
+      - merkle-network
+    # Override entrypoint and command to keep container running for interactive use
+    entrypoint: []
+    command: ["tail", "-f", "/dev/null"]
+    stdin_open: true
+    tty: true
+    restart: unless-stopped
+
+networks:
+  merkle-network:
+    driver: bridge
+
+volumes:
+  server_data:
+    name: merkle-server-data
+  client_data:
+    name: merkle-client-data
