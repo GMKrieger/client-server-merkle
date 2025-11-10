@@ -71,7 +71,7 @@ async fn upload_dir(server: &str, dir: PathBuf, root_file: PathBuf) -> anyhow::R
     }
 
     // 2. Build local Merkle tree and compute root
-    let tree = MerkleTree::from_bytes_vec(&files_bytes);
+    let tree = MerkleTree::from_bytes_vec(&files_bytes)?;
     let local_root_hex = hex::encode(tree.root_hash());
     println!("Local root: {}", local_root_hex);
 

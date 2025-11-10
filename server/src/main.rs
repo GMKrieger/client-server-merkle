@@ -67,7 +67,8 @@ async fn upload(
         files_bytes.push(data);
     }
 
-    let tree = MerkleTree::from_bytes_vec(&files_bytes);
+    let tree = MerkleTree::from_bytes_vec(&files_bytes)
+        .map_err(|e| actix_web::error::ErrorInternalServerError(e.to_string()))?;
     {
         let mut cache = state.cache.write().await;
         *cache = Some(tree);
@@ -101,7 +102,8 @@ async fn get_file(state: web::Data<AppState>, path: web::Path<String>) -> Result
         files_bytes.push(data);
     }
 
-    let tree = MerkleTree::from_bytes_vec(&files_bytes);
+    let tree = MerkleTree::from_bytes_vec(&files_bytes)
+        .map_err(|e| actix_web::error::ErrorInternalServerError(e.to_string()))?;
     let root = tree.root_hash();
 
     // find index
@@ -112,7 +114,8 @@ async fn get_file(state: web::Data<AppState>, path: web::Path<String>) -> Result
     };
 
     // generate proof
-    let proof = tree.generate_proof(index);
+    let proof = tree.generate_proof(index)
+        .map_err(|e| actix_web::error::ErrorInternalServerError(e.to_string()))?;
     let file_bytes = files_bytes[index].clone();
     let file_b64 = general_purpose::STANDARD.encode(&file_bytes);
     let root_hex = hex::encode(&root);
@@ -147,7 +150,8 @@ async fn commit(state: web::Data<AppState>) -> Result<impl actix_web::Responder>
         files_bytes.push(data);
     }
 
-    let tree = MerkleTree::from_bytes_vec(&files_bytes);
+    let tree = MerkleTree::from_bytes_vec(&files_bytes)
+        .map_err(|e| actix_web::error::ErrorInternalServerError(e.to_string()))?;
     let root = tree.root_hash();
     let root_hex = hex::encode(&root);
 
