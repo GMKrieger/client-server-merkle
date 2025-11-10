@@ -8,17 +8,12 @@ use std::fs;
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::Arc;
-use tokio::sync::RwLock;
 
 use merkle::{MerkleTree, ProofNode};
 
 #[derive(Clone)]
 struct AppState {
     storage_dir: PathBuf,
-    // We'll keep a cached root and tree; rebuild on each upload for simplicity
-    // Use an RwLock for concurrency
-    cache: Arc<RwLock<Option<MerkleTree>>>,
 }
 
 #[derive(Serialize)]
@@ -43,12 +38,13 @@ async fn get_file(state: web::Data<AppState>, path: web::Path<String>) -> Result
         return Ok(HttpResponse::NotFound().body("file not found"));
     }
 
-    // read list of files (sorted)
+    // read list of files (sorted), excluding metadata files
     let mut entries: Vec<_> = fs::read_dir(&state.storage_dir)?
         .filter_map(|res| res.ok())
         .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
         .map(|e| e.file_name().into_string().ok())
         .filter_map(|s| s)
+        .filter(|name| name != "manifest.json" && name != "root.hex")
         .collect();
     entries.sort();
 
@@ -90,11 +86,10 @@ async fn get_file(state: web::Data<AppState>, path: web::Path<String>) -> Result
 }
 
 async fn root(state: web::Data<AppState>) -> Result<impl Responder> {
-    let cache = state.cache.read().await;
-    if let Some(tree) = cache.as_ref() {
-        Ok(HttpResponse::Ok().body(hex::encode(tree.root_hash())))
-    } else {
-        Ok(HttpResponse::Ok().body("no root yet"))
+    let root_path = state.storage_dir.join("root.hex");
+    match fs::read_to_string(root_path) {
+        Ok(root) => Ok(HttpResponse::Ok().body(root.trim().to_string())),
+        Err(_) => Ok(HttpResponse::Ok().body("no root yet")),
     }
 }
 
@@ -175,12 +170,6 @@ async fn upload(state: web::Data<AppState>, mut payload: Multipart) -> Result<im
     let mut rfile = File::create(root_path)?;
     rfile.write_all(root_hex.as_bytes())?;
 
-    // 6. Cache tree
-    {
-        let mut cache = state.cache.write().await;
-        *cache = Some(tree);
-    }
-
     Ok(HttpResponse::Ok().json(UploadResponse {
         root: root_hex,
         files_count: file_count,
@@ -197,7 +186,6 @@ async fn main() -> std::io::Result<()> {
 
     let state = AppState {
         storage_dir: PathBuf::from(storage_dir),
-        cache: Arc::new(RwLock::new(None)),
     };
 
     println!(
