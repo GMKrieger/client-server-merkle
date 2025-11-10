@@ -1,6 +1,8 @@
 // server/src/main.rs
+use actix_multipart::Multipart;
 use actix_web::{App, HttpResponse, HttpServer, Responder, Result, web};
 use base64::{Engine as _, engine::general_purpose};
+use futures_util::stream::StreamExt as _;
 use serde::Serialize;
 use std::fs;
 use std::fs::File;
@@ -28,53 +30,9 @@ struct FileResponse {
 }
 
 #[derive(Serialize)]
-struct CommitResponse {
+struct UploadResponse {
     root: String,
-}
-
-async fn upload(
-    state: web::Data<AppState>,
-    query: web::Query<std::collections::HashMap<String, String>>,
-    body: web::Bytes,
-) -> Result<impl Responder> {
-    let filename = match query.get("name") {
-        Some(n) => n.clone(),
-        None => return Ok(HttpResponse::BadRequest().body("missing ?name=")),
-    };
-
-    let path = state.storage_dir.join(&filename);
-    // ensure directory exists
-    fs::create_dir_all(&state.storage_dir)?;
-
-    // write file bytes
-    let mut f = fs::File::create(&path)?;
-    f.write_all(&body)?;
-
-    // Rebuild Merkle tree (simple approach: read all files sorted)
-    let mut entries: Vec<_> = fs::read_dir(&state.storage_dir)?
-        .filter_map(|res| res.ok())
-        .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
-        .map(|e| e.file_name().into_string().ok())
-        .filter_map(|s| s)
-        .collect();
-
-    entries.sort(); // deterministic ordering
-
-    let mut files_bytes: Vec<Vec<u8>> = Vec::with_capacity(entries.len());
-    for name in &entries {
-        let p = state.storage_dir.join(name);
-        let data = fs::read(p)?;
-        files_bytes.push(data);
-    }
-
-    let tree = MerkleTree::from_bytes_vec(&files_bytes)
-        .map_err(|e| actix_web::error::ErrorInternalServerError(e.to_string()))?;
-    {
-        let mut cache = state.cache.write().await;
-        *cache = Some(tree);
-    }
-
-    Ok(HttpResponse::Ok().body("uploaded"))
+    files_count: usize,
 }
 
 async fn get_file(state: web::Data<AppState>, path: web::Path<String>) -> Result<impl Responder> {
@@ -114,7 +72,8 @@ async fn get_file(state: web::Data<AppState>, path: web::Path<String>) -> Result
     };
 
     // generate proof
-    let proof = tree.generate_proof(index)
+    let proof = tree
+        .generate_proof(index)
         .map_err(|e| actix_web::error::ErrorInternalServerError(e.to_string()))?;
     let file_bytes = files_bytes[index].clone();
     let file_b64 = general_purpose::STANDARD.encode(&file_bytes);
@@ -130,11 +89,61 @@ async fn get_file(state: web::Data<AppState>, path: web::Path<String>) -> Result
     Ok(HttpResponse::Ok().json(resp))
 }
 
-/// POST /commit
-/// Rebuilds the tree from files on disk, persists manifest & root, and returns root hex.
-async fn commit(state: web::Data<AppState>) -> Result<impl actix_web::Responder> {
-    // read all filenames (sorted)
-    let mut entries: Vec<_> = std::fs::read_dir(&state.storage_dir)?
+async fn root(state: web::Data<AppState>) -> Result<impl Responder> {
+    let cache = state.cache.read().await;
+    if let Some(tree) = cache.as_ref() {
+        Ok(HttpResponse::Ok().body(hex::encode(tree.root_hash())))
+    } else {
+        Ok(HttpResponse::Ok().body("no root yet"))
+    }
+}
+
+/// POST /upload
+/// Receives all files via multipart/form-data, clears storage, builds new tree.
+async fn upload(state: web::Data<AppState>, mut payload: Multipart) -> Result<impl Responder> {
+    // 1. Clear storage directory (delete all existing files)
+    if state.storage_dir.exists() {
+        for entry in fs::read_dir(&state.storage_dir)? {
+            let entry = entry?;
+            if entry.file_type()?.is_file() {
+                fs::remove_file(entry.path())?;
+            }
+        }
+    } else {
+        fs::create_dir_all(&state.storage_dir)?;
+    }
+
+    // 2. Process multipart data and save files
+    let mut file_count = 0;
+    while let Some(item) = payload.next().await {
+        let mut field = item.map_err(actix_web::error::ErrorBadRequest)?;
+
+        // Get filename from content disposition
+        let content_disp = field.content_disposition();
+        let filename = content_disp
+            .and_then(|cd| cd.get_filename())
+            .ok_or_else(|| actix_web::error::ErrorBadRequest("missing filename"))?;
+
+        let filepath = state.storage_dir.join(filename);
+
+        // Create file and write chunks
+        let mut f = web::block(move || std::fs::File::create(filepath))
+            .await?
+            .map_err(actix_web::error::ErrorInternalServerError)?;
+
+        // Write field data to file
+        while let Some(chunk) = field.next().await {
+            let data = chunk.map_err(actix_web::error::ErrorBadRequest)?;
+            f = web::block(move || f.write_all(&data).map(|_| f))
+                .await?
+                .map_err(actix_web::error::ErrorInternalServerError)?;
+        }
+
+        file_count += 1;
+    }
+
+    // 3. Read all filenames (sorted)
+    let mut entries: Vec<_> = fs::read_dir(&state.storage_dir)?
         .filter_map(|r| r.ok())
         .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
         .map(|e| e.file_name().into_string().ok())
@@ -142,11 +151,11 @@ async fn commit(state: web::Data<AppState>) -> Result<impl actix_web::Responder>
         .collect();
     entries.sort();
 
-    // read bytes and compute tree
+    // 4. Read bytes and compute tree
     let mut files_bytes: Vec<Vec<u8>> = Vec::with_capacity(entries.len());
     for name in &entries {
         let pb = state.storage_dir.join(name);
-        let data = std::fs::read(pb)?;
+        let data = fs::read(pb)?;
         files_bytes.push(data);
     }
 
@@ -155,35 +164,27 @@ async fn commit(state: web::Data<AppState>) -> Result<impl actix_web::Responder>
     let root = tree.root_hash();
     let root_hex = hex::encode(&root);
 
-    // persist manifest + root
+    // 5. Persist manifest + root
     let manifest_path = state.storage_dir.join("manifest.json");
     let root_path = state.storage_dir.join("root.hex");
 
-    // manifest: list of filenames in order
     let manifest_json = serde_json::to_string(&entries)?;
     let mut mfile = File::create(manifest_path)?;
     mfile.write_all(manifest_json.as_bytes())?;
 
-    // root hex
     let mut rfile = File::create(root_path)?;
     rfile.write_all(root_hex.as_bytes())?;
 
-    // cache tree
+    // 6. Cache tree
     {
         let mut cache = state.cache.write().await;
         *cache = Some(tree);
     }
 
-    Ok(HttpResponse::Ok().json(CommitResponse { root: root_hex }))
-}
-
-async fn root(state: web::Data<AppState>) -> Result<impl Responder> {
-    let cache = state.cache.read().await;
-    if let Some(tree) = cache.as_ref() {
-        Ok(HttpResponse::Ok().body(hex::encode(tree.root_hash())))
-    } else {
-        Ok(HttpResponse::Ok().body("no root yet"))
-    }
+    Ok(HttpResponse::Ok().json(UploadResponse {
+        root: root_hex,
+        files_count: file_count,
+    }))
 }
 
 #[actix_web::main]
@@ -210,7 +211,6 @@ async fn main() -> std::io::Result<()> {
             .route("/upload", web::post().to(upload))
             .route("/file/{name}", web::get().to(get_file))
             .route("/root", web::get().to(root))
-            .route("/commit", web::post().to(commit))
     })
     .bind(("0.0.0.0", port))?
     .run()

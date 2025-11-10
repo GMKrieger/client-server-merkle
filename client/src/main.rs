@@ -35,6 +35,12 @@ enum Commands {
     },
 }
 
+#[derive(serde::Deserialize)]
+struct UploadResp {
+    root: String,
+    files_count: usize,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -63,6 +69,10 @@ async fn upload_dir(server: &str, dir: PathBuf, root_file: PathBuf) -> anyhow::R
         .collect();
     entries.sort();
 
+    if entries.is_empty() {
+        anyhow::bail!("No files found in directory");
+    }
+
     let mut files_bytes: Vec<Vec<u8>> = Vec::with_capacity(entries.len());
     for name in &entries {
         let p = dir.join(name);
@@ -75,44 +85,42 @@ async fn upload_dir(server: &str, dir: PathBuf, root_file: PathBuf) -> anyhow::R
     let local_root_hex = hex::encode(tree.root_hash());
     println!("Local root: {}", local_root_hex);
 
-    // 3. Upload files (no deletes yet)
+    // 3. Build multipart form with all files
     let client = Client::new();
+    let url = format!("{}/upload", server.trim_end_matches('/'));
+
+    let mut form = reqwest::multipart::Form::new();
     for (i, name) in entries.iter().enumerate() {
-        let bytes = &files_bytes[i];
-        let url = format!(
-            "{}/upload?name={}",
-            server.trim_end_matches('/'),
-            urlencoding::encode(name)
-        );
-        let resp = client.post(&url).body(bytes.clone()).send().await?;
-        if !resp.status().is_success() {
-            anyhow::bail!("upload failed for {}: {:?}", name, resp.text().await?);
-        } else {
-            println!("uploaded {}", name);
-        }
+        let bytes = files_bytes[i].clone();
+        let part = reqwest::multipart::Part::bytes(bytes).file_name(name.clone());
+        form = form.part(name.clone(), part);
+        println!("Adding {} to upload", name);
     }
 
-    // 4. POST /commit to finalize on server and get server root
-    let commit_url = format!("{}/commit", server.trim_end_matches('/'));
-    let commit_resp = client.post(&commit_url).send().await?;
-    if !commit_resp.status().is_success() {
-        anyhow::bail!("commit failed: {}", commit_resp.text().await?);
+    // 4. Send upload request
+    println!("Uploading {} files...", entries.len());
+    let resp = client.post(&url).multipart(form).send().await?;
+
+    if !resp.status().is_success() {
+        anyhow::bail!("upload failed: {}", resp.text().await?);
     }
-    #[derive(serde::Deserialize)]
-    struct CommitResp {
-        root: String,
-    }
-    let commit_obj: CommitResp = commit_resp.json().await?;
-    println!("Server root: {}", commit_obj.root);
+
+    let upload_obj: UploadResp = resp.json().await?;
+    println!(
+        "Server received {} files, root: {}",
+        upload_obj.files_count, upload_obj.root
+    );
 
     // 5. Compare local root vs server root
-    if commit_obj.root != local_root_hex {
+    if upload_obj.root != local_root_hex {
         anyhow::bail!(
             "root mismatch: local {} vs server {}",
             local_root_hex,
-            commit_obj.root
+            upload_obj.root
         );
     }
+
+    println!("Root hashes match!");
 
     // 6. On match, persist local root and delete local files
     fs::write(&root_file, local_root_hex.as_bytes())?;
@@ -122,10 +130,7 @@ async fn upload_dir(server: &str, dir: PathBuf, root_file: PathBuf) -> anyhow::R
         println!("deleted local {}", name);
     }
 
-    println!(
-        "Upload+commit complete; local root saved at {:?}",
-        root_file
-    );
+    println!("Upload complete; local root saved at {:?}", root_file);
     Ok(())
 }
 

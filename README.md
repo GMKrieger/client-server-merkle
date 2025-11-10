@@ -6,11 +6,12 @@ A Rust-based client-server system implementing Merkle tree verification for secu
 
 This project demonstrates how Merkle trees can be used to ensure data integrity in distributed file storage:
 
-1. **Client uploads files** → Files are sent to the server
-2. **Server builds Merkle tree** → All files are hashed into a tree structure
-3. **Client verifies root hash** → Client and server roots must match
-4. **Client can retrieve files** → Server provides file + Merkle proof
-5. **Client verifies proof** → Ensures file hasn't been tampered with
+1. **Client builds local Merkle tree** → Computes root hash from all files
+2. **Client performs upload** → All files sent in single atomic request
+3. **Server builds Merkle tree** → Replaces any existing tree with new one
+4. **Client verifies root hash** → Client and server roots must match
+5. **Client can retrieve files** → Server provides file + Merkle proof
+6. **Client verifies proof** → Ensures file hasn't been tampered with
 
 ### Why Merkle Trees?
 
@@ -49,7 +50,7 @@ client-server-merkle/
 **Server** (`server/`)
 - Actix-web HTTP server on port 3000
 - Stores files in a directory
-- Rebuilds Merkle tree on each upload
+- Atomic upload: clears storage and builds new Merkle tree
 - Provides files with cryptographic proofs
 
 **Client** (`client/`)
@@ -219,14 +220,22 @@ docker-compose down -v
 
 The server exposes the following HTTP endpoints:
 
-### POST `/upload?name=<filename>`
-Upload a file to the server.
-- **Body**: Raw file bytes
-- **Response**: `"uploaded"`
-
-### POST `/commit`
-Finalize the tree and persist manifest + root hash.
-- **Response**: `{"root": "abc123..."}`
+### POST `/upload`
+Atomically upload all files and replace the entire Merkle tree.
+- **Content-Type**: `multipart/form-data`
+- **Body**: All files as multipart form fields
+- **Behavior**:
+  - Clears all existing files from storage
+  - Saves all uploaded files
+  - Builds new Merkle tree from uploaded files
+  - Persists manifest and root hash
+- **Response**:
+```json
+{
+  "root": "hex-encoded-root-hash",
+  "files_count": 3
+}
+```
 
 ### GET `/file/{name}`
 Retrieve a file with Merkle proof.
@@ -245,19 +254,22 @@ Retrieve a file with Merkle proof.
 
 ### GET `/root`
 Get the current cached Merkle root.
-- **Response**: Hex-encoded root hash
+- **Response**: Hex-encoded root hash or `"no root yet"`
 
 ## Workflow Example
 
 ### Upload Workflow
 
-1. Client reads local files and builds local Merkle tree
-2. Client uploads each file to server via `POST /upload`
-3. Client calls `POST /commit` to finalize server tree
-4. Server returns its root hash
-5. Client compares local root vs server root
-6. If they match: client saves root and deletes local files
-7. If mismatch: client aborts with error
+1. Client reads all local files and sorts them alphabetically
+2. Client builds local Merkle tree and computes root hash
+3. Client sends all files in a single atomic upload via `POST /upload`
+4. Server clears existing storage and saves all uploaded files
+5. Server builds new Merkle tree and returns its root hash
+6. Client compares local root vs server root
+7. If they match: client saves root and deletes local files
+8. If mismatch: client aborts with error (files not deleted)
+
+**Key advantage**: The upload is atomic - either all files are uploaded successfully with matching root hash, or nothing changes.
 
 ### Retrieval Workflow
 
@@ -268,15 +280,16 @@ Get the current cached Merkle root.
 5. If valid: file is authentic and unmodified
 6. Client writes verified file to disk
 
+**Note**: Even if the server tree changes after upload, verification will fail if the file was modified, providing tamper detection.
+
 ## File Ordering
 
 **Critical**: Both client and server must sort filenames alphabetically before building the Merkle tree. This ensures consistent tree structure and matching root hashes.
 
 This ordering happens in:
-- `client/src/main.rs:64` (upload)
-- `server/src/main.rs:61` (upload)
-- `server/src/main.rs:94` (get_file)
-- `server/src/main.rs:140` (commit)
+- `client/src/main.rs:64` (upload preparation)
+- `server/src/main.rs:53` (get_file endpoint)
+- `server/src/main.rs:154` (upload endpoint)
 
 ## License
 
