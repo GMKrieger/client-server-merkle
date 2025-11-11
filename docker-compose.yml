@@ -10,7 +10,7 @@ services:
     ports:
       - "3000:3000"
     volumes:
-      - server_data:/data/server_files
+      - ./server_files:/data/server_files
     networks:
       - merkle-network
     healthcheck:
@@ -32,7 +32,7 @@ services:
     environment:
       - SERVER_URL=http://server:3000
     volumes:
-      - client_data:/data/client_files
+      - ./client_files:/data/client_files
     networks:
       - merkle-network
     # Override entrypoint and command to keep container running for interactive use
@@ -45,9 +45,3 @@ services:
 networks:
   merkle-network:
     driver: bridge
-
-volumes:
-  server_data:
-    name: merkle-server-data
-  client_data:
-    name: merkle-client-data

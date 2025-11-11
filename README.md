@@ -130,8 +130,11 @@ cargo run --release --bin client -- \
 ### Quick Start
 
 ```bash
-# Start both server and client containers
-docker-compose up -d
+# Create local directories for file storage (if not already created)
+mkdir -p client_files server_files
+
+# Start the server
+docker-compose up -d server
 
 # Check status
 docker-compose ps
@@ -144,57 +147,77 @@ docker-compose logs -f server
 
 - **merkle-server**: Runs the HTTP server continuously
   - Exposed on `http://localhost:3000`
-  - Persistent storage via `merkle-server-data` volume
+  - Persistent storage via bind mount to `./server_files/`
 
 - **merkle-client**: Interactive container for running client commands
   - Connects to server via internal Docker network
-  - Persistent storage via `merkle-client-data` volume
+  - Persistent storage via bind mount to `./client_files/`
+
+**Important**: The containers use bind mounts, meaning files in `./client_files/` and `./server_files/` on your host are directly accessible inside the containers. No copying required!
 
 ### Using the Client Container
 
-**Interactive shell:**
+**Prepare files on your host:**
 ```bash
-docker-compose exec client /bin/bash
+# Place files you want to upload in the local directory
+echo "Hello Merkle!" > ./client_files/test.txt
+cp /path/to/myfile.txt ./client_files/
 ```
 
-**Inside the container:**
+**Run client commands directly (recommended):**
 ```bash
-# Server is accessible at http://server:3000 (Docker service name)
-
-# Create a test file
-echo "Hello Merkle!" > /data/client_files/test.txt
-
 # Upload files to server
-client --server http://server:3000 upload \
+docker-compose run --rm client client \
+  --server http://server:3000 \
+  upload \
   --dir /data/client_files \
   --root-file /data/client_files/root.hex
 
 # Request file back (with verification)
-client --server http://server:3000 request \
+docker-compose run --rm client client \
+  --server http://server:3000 \
+  request \
   --name test.txt \
   --root-file /data/client_files/root.hex \
   --out /data/client_files/retrieved.txt
+
+# Check the retrieved file on your host
+cat ./client_files/retrieved.txt
 ```
 
-**One-off commands (without entering shell):**
+**Alternative: Interactive shell:**
 ```bash
-docker-compose exec client client --server http://server:3000 --help
+# Enter the client container
+docker-compose exec client /bin/bash
+
+# Inside the container, run commands
+client --server http://server:3000 upload \
+  --dir /data/client_files \
+  --root-file /data/client_files/root.hex
 ```
 
 ### Managing Files in Docker
 
-**Copy files from host to client container:**
+**Add files for upload:**
 ```bash
-docker cp ./local_file.txt merkle-client:/data/client_files/
+# Files in ./client_files/ are immediately accessible in the container
+cp ./myfile.txt ./client_files/
+echo "test data" > ./client_files/newfile.txt
 ```
 
-**Copy files from client container to host:**
+**Access uploaded files:**
 ```bash
-docker cp merkle-client:/data/client_files/file.txt ./local_file.txt
+# Files uploaded to the server appear in ./server_files/
+ls -la ./server_files/
+cat ./server_files/test.txt
 ```
 
-**List files in server storage:**
+**View files in containers (if needed):**
 ```bash
+# List client files
+docker-compose exec client ls -la /data/client_files/
+
+# List server files
 docker-compose exec server ls -la /data/server_files/
 ```
 
@@ -212,8 +235,51 @@ docker-compose up -d --build
 # Stop containers
 docker-compose down
 
-# Remove volumes (deletes all stored files)
-docker-compose down -v
+# Clean up local files (if desired)
+rm -rf ./client_files/* ./server_files/*
+
+# Note: The local directories ./client_files/ and ./server_files/ persist on your host
+# and are NOT automatically deleted when containers are stopped
+```
+
+### Complete Testing Example
+
+Here's a full end-to-end workflow for testing with Docker:
+
+```bash
+# 1. Create local directories
+mkdir -p client_files server_files
+
+# 2. Create some test files
+echo "Hello from file 1" > ./client_files/file1.txt
+echo "Hello from file 2" > ./client_files/file2.txt
+echo "Hello from file 3" > ./client_files/file3.txt
+
+# 3. Start the server
+docker-compose up -d server
+
+# 4. Upload files and get root hash
+docker-compose run --rm client client \
+  --server http://server:3000 \
+  upload \
+  --dir /data/client_files \
+  --root-file /data/client_files/root.hex
+
+# 5. Check that root.hex was created on your host
+cat ./client_files/root.hex
+
+# 6. Verify files were uploaded to server
+ls -la ./server_files/
+
+# 7. Request a file back with verification
+docker-compose run --rm client client \
+  --server http://server:3000 \
+  request \
+  --name file2.txt \
+  --root-file /data/client_files/root.hex
+
+# 8. Clean up
+docker-compose down && rm -rf ./client_files/* ./server_files/*
 ```
 
 ## API Endpoints

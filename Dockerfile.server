@@ -18,11 +18,6 @@ WORKDIR /home/appuser
 # copy binary
 COPY --from=builder /workspace/target/release/server /usr/local/bin/server
 
-# create storage dir and adjust permissions
-RUN mkdir -p /data/server_files && chown -R appuser:appuser /data
-
-USER appuser
-
 ENV STORAGE_DIR=/data/server_files
 ENV PORT=3000
 

@@ -14,11 +14,6 @@ WORKDIR /home/appuser
 
 COPY --from=builder /workspace/target/release/client /usr/local/bin/client
 
-# Create directory for client files
-RUN mkdir -p /data/client_files && chown -R appuser:appuser /data
-
-USER appuser
-
 # Set entrypoint to client binary so commands can be passed directly
 ENTRYPOINT ["/usr/local/bin/client"]
 
