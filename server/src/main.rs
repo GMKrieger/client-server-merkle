@@ -110,7 +110,7 @@ async fn get_file(state: web::Data<AppState>, path: web::Path<String>) -> Result
     let tree = MerkleTree::from_bytes_vec(&files_bytes)
         .map_err(|e| actix_web::error::ErrorInternalServerError(e.to_string()))?;
     let root = tree
-        .root_hash()
+        .root_hash_ref()
         .map_err(|e| actix_web::error::ErrorInternalServerError(e.to_string()))?;
 
     // find index
@@ -126,7 +126,7 @@ async fn get_file(state: web::Data<AppState>, path: web::Path<String>) -> Result
         .map_err(|e| actix_web::error::ErrorInternalServerError(e.to_string()))?;
     let file_bytes = files_bytes[index].clone();
     let file_b64 = general_purpose::STANDARD.encode(&file_bytes);
-    let root_hex = hex::encode(&root);
+    let root_hex = hex::encode(root);
 
     let resp = FileResponse {
         file_name,
@@ -256,9 +256,9 @@ async fn upload(state: web::Data<AppState>, mut payload: Multipart) -> Result<im
     let tree = MerkleTree::from_bytes_vec(&files_bytes)
         .map_err(|e| actix_web::error::ErrorInternalServerError(e.to_string()))?;
     let root = tree
-        .root_hash()
+        .root_hash_ref()
         .map_err(|e| actix_web::error::ErrorInternalServerError(e.to_string()))?;
-    let root_hex = hex::encode(&root);
+    let root_hex = hex::encode(root);
 
     // 5. Persist manifest + root
     let manifest_path = state.storage_dir.join("manifest.json");

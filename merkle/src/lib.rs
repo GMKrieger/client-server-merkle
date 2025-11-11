@@ -4,10 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::fmt;
-use std::fs;
-use std::io::{self, Read};
-use std::path::Path;
+use std::io::{self};
 use thiserror::Error;
 
 /// Type alias for backward compatibility
@@ -50,18 +47,6 @@ pub struct ProofNode {
     pub is_left: bool,
 }
 
-impl ProofNode {
-    /// Create a new proof node
-    pub fn new(hash: Hash, is_left: bool) -> Self {
-        ProofNode { hash, is_left }
-    }
-
-    /// Get hash as hex string
-    pub fn hash_hex(&self) -> String {
-        hex::encode(&self.hash)
-    }
-}
-
 /// A Merkle tree for verifiable data integrity.
 ///
 /// The tree is built from leaf hashes and stores all levels from leaves to root.
@@ -74,11 +59,10 @@ pub struct MerkleTree {
 }
 
 impl MerkleTree {
-    /// Build a Merkle tree from leaf hashes.
-    ///
+    /// Build from raw file bytes (hash each file with SHA-256).
     /// # Arguments
     ///
-    /// * `leaves` - Vector of pre-computed hashes (e.g., SHA-256 of file bytes)
+    /// * `files` - Vector of bytes
     ///
     /// # Errors
     ///
@@ -87,17 +71,19 @@ impl MerkleTree {
     /// # Examples
     ///
     /// ```
-    /// use merkle::{MerkleTree, sha256};
+    /// use merkle::MerkleTree;
     ///
-    /// let leaves = vec![
-    ///     sha256(b"data1"),
-    ///     sha256(b"data2"),
-    ///     sha256(b"data3"),
-    /// ];
-    /// let tree = MerkleTree::from_leaves(leaves)?;
+    /// let files = vec![b"file1".to_vec(), b"file2".to_vec()];
+    /// let tree = MerkleTree::from_bytes_vec(&files)?;
     /// # Ok::<(), merkle::MerkleError>(())
     /// ```
-    pub fn from_leaves(leaves: Vec<Hash>) -> Result<Self> {
+    pub fn from_bytes_vec(files: &[Vec<u8>]) -> Result<Self> {
+        let leaves: Vec<Hash> = files.iter().map(|b| sha256(b)).collect();
+        MerkleTree::from_leaves(leaves)
+    }
+
+    /// Build a Merkle tree from leaf hashes.
+    fn from_leaves(leaves: Vec<Hash>) -> Result<Self> {
         if leaves.is_empty() {
             return Err(MerkleError::EmptyLeaves);
         }
@@ -125,169 +111,6 @@ impl MerkleTree {
         }
 
         Ok(MerkleTree { levels })
-    }
-
-    /// Build from raw file bytes (hash each file with SHA-256).
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use merkle::MerkleTree;
-    ///
-    /// let files = vec![b"file1".to_vec(), b"file2".to_vec()];
-    /// let tree = MerkleTree::from_bytes_vec(&files)?;
-    /// # Ok::<(), merkle::MerkleError>(())
-    /// ```
-    pub fn from_bytes_vec(files: &[Vec<u8>]) -> Result<Self> {
-        let leaves: Vec<Hash> = files.iter().map(|b| sha256(b)).collect();
-        MerkleTree::from_leaves(leaves)
-    }
-
-    /// Build from file paths (reads files into memory).
-    ///
-    /// # Arguments
-    ///
-    /// * `paths` - File paths to read and hash
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use merkle::MerkleTree;
-    /// use std::path::PathBuf;
-    ///
-    /// let paths = vec![
-    ///     PathBuf::from("file1.txt"),
-    ///     PathBuf::from("file2.txt"),
-    /// ];
-    /// let tree = MerkleTree::from_file_paths(&paths)?;
-    /// # Ok::<(), merkle::MerkleError>(())
-    /// ```
-    pub fn from_file_paths(paths: &[impl AsRef<Path>]) -> Result<Self> {
-        let mut leaves = Vec::with_capacity(paths.len());
-        for p in paths {
-            let mut f = fs::File::open(p.as_ref())?;
-            let mut buf = Vec::new();
-            f.read_to_end(&mut buf)?;
-            leaves.push(sha256(&buf));
-        }
-        MerkleTree::from_leaves(leaves)
-    }
-
-    /// Build from a directory with optional file filtering.
-    ///
-    /// Reads all files in the directory, optionally filtered by a predicate,
-    /// sorts them alphabetically, and builds a Merkle tree.
-    ///
-    /// # Arguments
-    ///
-    /// * `dir` - Directory path
-    /// * `filter` - Optional predicate to filter files by name
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use merkle::MerkleTree;
-    /// use std::path::Path;
-    ///
-    /// // Include all files
-    /// let tree = MerkleTree::from_directory(
-    ///     Path::new("./files"),
-    ///     None::<fn(&str) -> bool>
-    /// )?;
-    ///
-    /// // Exclude metadata files
-    /// let tree = MerkleTree::from_directory(
-    ///     Path::new("./files"),
-    ///     Some(|name: &str| !name.ends_with(".json") && !name.ends_with(".hex"))
-    /// )?;
-    /// # Ok::<(), merkle::MerkleError>(())
-    /// ```
-    pub fn from_directory<F>(dir: &Path, filter: Option<F>) -> Result<Self>
-    where
-        F: Fn(&str) -> bool,
-    {
-        let mut entries: Vec<_> = fs::read_dir(dir)?
-            .filter_map(|res| res.ok())
-            .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
-            .filter_map(|e| e.file_name().into_string().ok())
-            .filter(|name| filter.as_ref().map_or(true, |f| f(name)))
-            .collect();
-
-        entries.sort();
-
-        if entries.is_empty() {
-            return Err(MerkleError::EmptyLeaves);
-        }
-
-        let mut files_bytes: Vec<Vec<u8>> = Vec::with_capacity(entries.len());
-        for name in &entries {
-            let path = dir.join(name);
-            let data = fs::read(path)?;
-            files_bytes.push(data);
-        }
-
-        MerkleTree::from_bytes_vec(&files_bytes)
-    }
-
-    /// Return a reference to the root hash (avoids cloning).
-    pub fn root_hash_ref(&self) -> Result<&[u8]> {
-        self.levels
-            .last()
-            .and_then(|level| level.first())
-            .map(|hash| hash.as_slice())
-            .ok_or(MerkleError::EmptyLeaves)
-    }
-
-    /// Return the root hash (clones the hash).
-    pub fn root_hash(&self) -> Result<Hash> {
-        Ok(self.root_hash_ref()?.to_vec())
-    }
-
-    /// Return the root hash as a hex string.
-    pub fn root_hash_hex(&self) -> Result<String> {
-        Ok(hex::encode(self.root_hash_ref()?))
-    }
-
-    /// Number of leaves in the tree.
-    pub fn leaf_count(&self) -> usize {
-        self.levels[0].len()
-    }
-
-    /// Height of the tree (number of levels).
-    pub fn tree_height(&self) -> usize {
-        self.levels.len()
-    }
-
-    /// Get a reference to a specific leaf hash by index.
-    ///
-    /// # Errors
-    ///
-    /// Returns `MerkleError::IndexOutOfBounds` if index >= leaf_count.
-    pub fn get_leaf_hash(&self, index: usize) -> Result<&[u8]> {
-        self.levels[0]
-            .get(index)
-            .map(|h| h.as_slice())
-            .ok_or(MerkleError::IndexOutOfBounds {
-                index,
-                leaf_count: self.leaf_count(),
-            })
-    }
-
-    /// Get all leaf hashes.
-    pub fn get_leaves(&self) -> &[Hash] {
-        &self.levels[0]
-    }
-
-    /// Find the index of a leaf by its hash value.
-    ///
-    /// # Errors
-    ///
-    /// Returns `MerkleError::LeafNotFound` if the hash is not in the tree.
-    pub fn find_leaf_index(&self, hash: &[u8]) -> Result<usize> {
-        self.levels[0]
-            .iter()
-            .position(|h| h.as_slice() == hash)
-            .ok_or(MerkleError::LeafNotFound)
     }
 
     /// Generate Merkle proof for a leaf at `index` (0-based).
@@ -342,16 +165,6 @@ impl MerkleTree {
         Ok(proof)
     }
 
-    /// Generate proof for a leaf identified by its hash.
-    ///
-    /// # Errors
-    ///
-    /// Returns `MerkleError::LeafNotFound` if the hash is not in the tree.
-    pub fn generate_proof_by_hash(&self, leaf_hash: &[u8]) -> Result<Vec<ProofNode>> {
-        let index = self.find_leaf_index(leaf_hash)?;
-        self.generate_proof(index)
-    }
-
     /// Verify a proof against this tree's root.
     ///
     /// # Examples
@@ -380,28 +193,43 @@ impl MerkleTree {
 
     /// Compute the root hash by applying a proof to a leaf hash.
     fn compute_root_from_proof(leaf_hash: &[u8], proof: &[ProofNode]) -> Hash {
-        let mut cur: Hash = leaf_hash.to_vec();
+        let mut current: Hash = leaf_hash.to_vec();
 
         for node in proof {
             if node.is_left {
-                // sibling is left: hash(sibling || cur)
-                cur = hash_concat(&node.hash, &cur);
+                // sibling is left: hash(sibling || current)
+                current = hash_concat(&node.hash, &current);
             } else {
-                // sibling is right: hash(cur || sibling)
-                cur = hash_concat(&cur, &node.hash);
+                // sibling is right: hash(current || sibling)
+                current = hash_concat(&current, &node.hash);
             }
         }
 
-        cur
+        current
     }
 
-    /// Compare two root hashes with detailed error information.
-    pub fn compare_roots(expected: &[u8], actual: &[u8]) -> Result<()> {
-        if expected == actual {
-            Ok(())
-        } else {
-            Err(MerkleError::VerificationFailed)
-        }
+    /// Return a reference to the root hash.
+    pub fn root_hash_ref(&self) -> Result<&[u8]> {
+        self.levels
+            .last()
+            .and_then(|level| level.first())
+            .map(|hash| hash.as_slice())
+            .ok_or(MerkleError::EmptyLeaves)
+    }
+
+    /// Number of leaves in the tree.
+    pub fn leaf_count(&self) -> usize {
+        self.levels[0].len()
+    }
+
+    /// Height of the tree (number of levels).
+    pub fn tree_height(&self) -> usize {
+        self.levels.len()
+    }
+
+    /// Get all leaf hashes.
+    pub fn get_leaves(&self) -> &[Hash] {
+        &self.levels[0]
     }
 
     /// Serialize the tree to JSON.
@@ -412,20 +240,6 @@ impl MerkleTree {
     /// Deserialize a tree from JSON.
     pub fn from_json(json: &str) -> Result<Self> {
         Ok(serde_json::from_str(json)?)
-    }
-}
-
-impl fmt::Display for MerkleTree {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "MerkleTree {{")?;
-        writeln!(f, "  leaves: {}", self.leaf_count())?;
-        writeln!(f, "  height: {}", self.tree_height())?;
-        let root_hex = self
-            .root_hash_ref()
-            .map(hex::encode)
-            .unwrap_or_else(|_| "error".to_string());
-        writeln!(f, "  root: {}", root_hex)?;
-        write!(f, "}}")
     }
 }
 
@@ -558,61 +372,6 @@ mod tests {
 
         let result = tree.generate_proof(2);
         assert!(matches!(result, Err(MerkleError::IndexOutOfBounds { .. })));
-
-        let result = tree.get_leaf_hash(2);
-        assert!(matches!(result, Err(MerkleError::IndexOutOfBounds { .. })));
-    }
-
-    #[test]
-    fn test_get_leaf_hash() {
-        let data = vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()];
-        let tree = MerkleTree::from_bytes_vec(&data).unwrap();
-
-        let leaf0 = tree.get_leaf_hash(0).unwrap();
-        assert_eq!(leaf0, sha256(b"a").as_slice());
-
-        let leaf1 = tree.get_leaf_hash(1).unwrap();
-        assert_eq!(leaf1, sha256(b"b").as_slice());
-    }
-
-    #[test]
-    fn test_find_leaf_index() {
-        let data = vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()];
-        let tree = MerkleTree::from_bytes_vec(&data).unwrap();
-
-        let hash_b = sha256(b"b");
-        let index = tree.find_leaf_index(&hash_b).unwrap();
-        assert_eq!(index, 1);
-
-        let not_found = sha256(b"not in tree");
-        assert!(matches!(
-            tree.find_leaf_index(&not_found),
-            Err(MerkleError::LeafNotFound)
-        ));
-    }
-
-    #[test]
-    fn test_generate_proof_by_hash() {
-        let data = vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()];
-        let tree = MerkleTree::from_bytes_vec(&data).unwrap();
-
-        let hash_b = sha256(b"b");
-        let proof = tree.generate_proof_by_hash(&hash_b).unwrap();
-
-        assert!(tree.verify(&hash_b, &proof).unwrap());
-    }
-
-    #[test]
-    fn test_root_hash_hex() {
-        let data = vec![b"test".to_vec()];
-        let tree = MerkleTree::from_bytes_vec(&data).unwrap();
-
-        let hex_root = tree.root_hash_hex().unwrap();
-        assert_eq!(hex_root.len(), 64); // 32 bytes * 2 hex chars
-
-        // Should match manual encoding
-        let manual_hex = hex::encode(tree.root_hash().unwrap());
-        assert_eq!(hex_root, manual_hex);
     }
 
     #[test]
@@ -638,7 +397,10 @@ mod tests {
 
         // Deserialize
         let tree2 = MerkleTree::from_json(&json).unwrap();
-        assert_eq!(tree.root_hash().unwrap(), tree2.root_hash().unwrap());
+        assert_eq!(
+            tree.root_hash_ref().unwrap(),
+            tree2.root_hash_ref().unwrap()
+        );
         assert_eq!(tree.leaf_count(), tree2.leaf_count());
     }
 
@@ -661,29 +423,5 @@ mod tests {
             // Proof length should be log2(100) ≈ 7
             assert!(proof.len() >= 6 && proof.len() <= 8);
         }
-    }
-
-    #[test]
-    fn test_display_trait() {
-        let data = vec![b"a".to_vec(), b"b".to_vec()];
-        let tree = MerkleTree::from_bytes_vec(&data).unwrap();
-
-        let display = format!("{}", tree);
-        assert!(display.contains("MerkleTree"));
-        assert!(display.contains("leaves: 2"));
-        assert!(display.contains("height: 2"));
-        assert!(display.contains("root:"));
-    }
-
-    #[test]
-    fn test_proof_node_methods() {
-        let hash = sha256(b"test");
-        let node = ProofNode::new(hash.clone(), true);
-
-        assert_eq!(node.hash, hash);
-        assert!(node.is_left);
-
-        let hex = node.hash_hex();
-        assert_eq!(hex.len(), 64);
     }
 }
