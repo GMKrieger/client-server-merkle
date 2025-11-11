@@ -379,7 +379,7 @@ impl MerkleTree {
     }
 
     /// Compute the root hash by applying a proof to a leaf hash.
-    pub fn compute_root_from_proof(leaf_hash: &[u8], proof: &[ProofNode]) -> Hash {
+    fn compute_root_from_proof(leaf_hash: &[u8], proof: &[ProofNode]) -> Hash {
         let mut cur: Hash = leaf_hash.to_vec();
 
         for node in proof {
@@ -420,7 +420,8 @@ impl fmt::Display for MerkleTree {
         writeln!(f, "MerkleTree {{")?;
         writeln!(f, "  leaves: {}", self.leaf_count())?;
         writeln!(f, "  height: {}", self.tree_height())?;
-        let root_hex = self.root_hash_ref()
+        let root_hex = self
+            .root_hash_ref()
             .map(hex::encode)
             .unwrap_or_else(|_| "error".to_string());
         writeln!(f, "  root: {}", root_hex)?;
@@ -492,14 +493,13 @@ mod tests {
         // Tests duplication of last node when odd
         let data = vec![b"alpha".to_vec(), b"bravo".to_vec(), b"charlie".to_vec()];
         let tree = MerkleTree::from_bytes_vec(&data).unwrap();
-        let root = tree.root_hash().unwrap();
         assert_eq!(tree.leaf_count(), 3);
 
         for i in 0..3 {
             let leaf_hash = sha256(&data[i]);
             let proof = tree.generate_proof(i).unwrap();
             assert!(
-                MerkleTree::verify_proof(&leaf_hash, &proof, &root),
+                tree.verify(&leaf_hash, &proof).unwrap(),
                 "proof for index {} should verify",
                 i
             );
@@ -525,13 +525,12 @@ mod tests {
     fn test_verify_fails_if_tampered() {
         let files = vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec(), b"d".to_vec()];
         let tree = MerkleTree::from_bytes_vec(&files).unwrap();
-        let root = tree.root_hash().unwrap();
         let leaf_hash = sha256(&files[2]);
         let mut proof = tree.generate_proof(2).unwrap();
 
         // Tamper with proof
         proof[0].hash[0] ^= 0xff;
-        assert!(!MerkleTree::verify_proof(&leaf_hash, &proof, &root));
+        assert!(!tree.verify(&leaf_hash, &proof).unwrap());
     }
 
     #[test]
