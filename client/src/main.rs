@@ -59,6 +59,25 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn validate_filename(name: &str) -> anyhow::Result<()> {
+    if name.is_empty() {
+        anyhow::bail!("filename cannot be empty");
+    }
+    if name.contains("..") || name.contains('/') || name.contains('\\') {
+        anyhow::bail!("invalid filename '{}': path traversal not allowed", name);
+    }
+    if name == "manifest.json" || name == "root.hex" {
+        anyhow::bail!("invalid filename '{}': reserved name", name);
+    }
+    if name.chars().any(|c| c.is_control() || c == '\0') {
+        anyhow::bail!("invalid filename '{}': contains control characters", name);
+    }
+    if name.len() > 255 {
+        anyhow::bail!("filename '{}' too long (max 255 characters)", name);
+    }
+    Ok(())
+}
+
 async fn upload_dir(server: &str, dir: PathBuf, root_file: PathBuf) -> anyhow::Result<()> {
     // 1. Read and sort local files
     let mut entries: Vec<_> = fs::read_dir(&dir)?
@@ -73,6 +92,11 @@ async fn upload_dir(server: &str, dir: PathBuf, root_file: PathBuf) -> anyhow::R
         anyhow::bail!("No files found in directory");
     }
 
+    // Validate all filenames before uploading
+    for name in &entries {
+        validate_filename(name)?;
+    }
+
     let mut files_bytes: Vec<Vec<u8>> = Vec::with_capacity(entries.len());
     for name in &entries {
         let p = dir.join(name);
@@ -82,7 +106,7 @@ async fn upload_dir(server: &str, dir: PathBuf, root_file: PathBuf) -> anyhow::R
 
     // 2. Build local Merkle tree and compute root
     let tree = MerkleTree::from_bytes_vec(&files_bytes)?;
-    let local_root_hex = hex::encode(tree.root_hash());
+    let local_root_hex = hex::encode(tree.root_hash()?);
     println!("Local root: {}", local_root_hex);
 
     // 3. Build multipart form with all files
@@ -140,6 +164,9 @@ async fn request_file(
     root_file: PathBuf,
     out: Option<PathBuf>,
 ) -> anyhow::Result<()> {
+    // validate filename
+    validate_filename(name)?;
+
     // read local saved root
     let saved_root = fs::read_to_string(&root_file)?;
     let saved_root_bytes = hex::decode(saved_root.trim())?;
@@ -167,16 +194,16 @@ async fn request_file(
 
     // verify using local saved root
     let ok_local = MerkleTree::verify_proof(&leaf_hash, &proof, &saved_root_bytes);
-    if ok_local {
-        println!("File verified against local saved root.");
-    } else {
-        println!(
-            "WARNING: verification against local root FAILED. Server root: {}",
+    if !ok_local {
+        anyhow::bail!(
+            "Verification FAILED: proof does not match local saved root. Server root: {}. File rejected.",
             server_root_hex
         );
     }
 
-    // write file
+    println!("File verified against local saved root.");
+
+    // write file only if verification succeeded
     let out_path = out.unwrap_or_else(|| PathBuf::from(name));
     let mut f = fs::File::create(&out_path)?;
     f.write_all(&file_bytes)?;
